@@ -1,62 +1,109 @@
-name: GitHub Actions CI
+name: CI
 on:
   push:
     branches: master
   pull_request:
 jobs:
-  tests:
-    runs-on: macOS-latest
+  tap_syntax:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/homebrew/ubuntu22.04:master
+    env:
+      HOMEBREW_SIMULATE_MACOS_ON_LINUX: 1
+    steps:
+      - name: Set up Homebrew
+        id: set-up-homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - run: brew test-bot --only-tap-syntax
+  rspec_tests:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
     - name: Set up Homebrew
       id: set-up-homebrew
       uses: Homebrew/actions/setup-homebrew@master
 
-    - name: Cache Homebrew Bundler RubyGems
-      id: cache
-      uses: actions/cache@v1
-      with:
-        path: ${{ steps.set-up-homebrew.outputs.gems-path }}
-        key: ${{ runner.os }}-rubygems-${{ steps.set-up-homebrew.outputs.gems-hash }}
-        restore-keys: ${{ runner.os }}-rubygems-
-
-    - name: Install Homebrew Bundler RubyGems
-      if: steps.cache.outputs.cache-hit != 'true'
-      run: brew install-bundler-gems
-
-    - run: brew test-bot --only-tap-syntax
-
     - name: Set up Ruby
-      if: matrix.os == 'ubuntu-latest'
-      uses: actions/setup-ruby@master
+      uses: ruby/setup-ruby@2654679fe7f7c29875c669398a8ec0791b8a64a1 # v1.215.0
       with:
-        ruby-version: '2.6'
-
-    - name: Install Bundler
-      run: gem install bundler -v "~>1"
-
-    - name: Install Homebrew/homebrew-services RubyGems
-      run: bundle install --jobs 4 --retry 3
+        bundler-cache: true
 
     - name: Run Homebrew/homebrew-services RSpec tests
       run: bundle exec rspec
 
+  functional_tests:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      HOMEBREW_NO_INSTALL_FROM_API: 1
+    steps:
+    - name: Enable linger
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        loginctl enable-linger "$(whoami)"
+        echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+
+    - name: Set up Homebrew
+      id: set-up-homebrew
+      uses: Homebrew/actions/setup-homebrew@master
+
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@2654679fe7f7c29875c669398a8ec0791b8a64a1 # v1.215.0
+      with:
+        bundler-cache: true
+
+    - name: Unlink services repo
+      run: |
+        rm "$(brew --repo homebrew/services)"
+        cp -a "$PWD" "$(brew --repo homebrew/services)"
+
     - name: Test start command
       run: |
-        brew install redis
-        brew services start redis
-        brew services list | grep redis
+        brew install consul
+        brew services start consul
+        brew services list | grep consul
         sleep 5
-        redis-cli INFO | grep uptime_in_seconds
+        consul kv get -recurse
+
+    - name: Test restart command
+      run: |
+        brew services stop consul
+        sleep 5
+        brew services run consul
+        brew services restart consul
+        brew services list | grep consul
+        sleep 5
+        consul kv get -recurse
 
     - name: Test stop command
       run: |
-        brew services stop redis
+        brew services stop consul
         sleep 5
-        if launchctl list | grep redis; then false; else true; fi
+        brew services list | grep consul | grep none
 
     - name: Test run command
       run: |
-        brew services run redis
+        brew services run consul
         sleep 5
-        redis-cli INFO | grep uptime_in_seconds
-        brew services stop redis
+        consul kv get -recurse
+        brew services stop consul
+
+    - name: Test list command
+      run: |
+        brew services | grep consul
+
+    - name: Test info command
+      run: |
+        brew services info consul | grep consul
+        brew services info consul --verbose | grep consul
+        brew services info consul --json | ruby -e "require 'json'" -e "puts JSON.parse(ARGF.read)"
+
+    - name: Link services repo
+      run: |
+        rm -rf "$(brew --repo homebrew/services)"
+        ln -s "$PWD" "$(brew --repo homebrew/services)"
